@@ -1,32 +1,670 @@
 
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
 const path = require('path');
+const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// 게임 화면(index.html) 제공
-app.use(express.static(path.join(__dirname)));
+const PORT = process.env.PORT || 3000;
+const UNIT = 50000;
+const START = 2000000;
+const MAX_ROUNDS = 13;
 
-// 메인 주소 접속 시 게임 화면 표시
+const rooms = new Map();
+
+// 게임 화면 제공
+// 서버 소스 파일은 공개하지 않음
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+  res.sendFile(path.join(__dirname, 'index.html'), err => {
+    if (err && !res.headersSent) {
+      res.status(500).send(
+        'index.html 파일을 확인해주세요.'
+      );
+    }
+  });
 });
 
-const rooms=new Map(),UNIT=50000,START=2000000;
-const shuffle=a=>{a=[...a];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;};
-const code=()=>Math.random().toString(36).slice(2,8).toUpperCase();
-function active(r){return r.players.filter(p=>p.money>0&&!p.disconnected);}
-function emit(r){for(const p of r.players){const visible=r.players.map(q=>({id:q.id,name:q.name,money:q.money,fold:q.fold,allin:q.allin,bet:q.bet,roundBet:q.roundBet,disconnected:q.disconnected,publicCard:q.id===p.id?null:q.publicCard,privateCard:q.id===p.id?q.privateCard:null,usedPublic:q.id===p.id?q.usedPublic:undefined,usedPrivate:q.id===p.id?q.usedPrivate:undefined}));io.to(p.id).emit('state',{code:r.code,host:r.host,phase:r.phase,round:r.round,pot:r.pot,currentBet:r.currentBet,turn:r.turn,players:visible,me:p.id,log:r.log.slice(-12),winners:r.winners,showdown:r.showdown,canStart:r.players.length>=3&&r.players.length<=6});}}
-function log(r,msg){r.log.push(msg);if(r.log.length>100)r.log.shift();}
-function pay(r,p,n){const amount=Math.min(n,p.money);p.money-=amount;p.bet+=amount;p.roundBet+=amount;r.pot+=amount;if(p.money===0)p.allin=true;return amount;}
-function begin(r){r.round++;r.phase='bet';r.pot=0;r.currentBet=0;r.winners=[];r.showdown=[];r.acted=new Set();r.players.forEach(p=>{p.fold=p.money<=0||p.disconnected;p.allin=false;p.bet=0;p.roundBet=0;p.publicCard=null;p.privateCard=null;if(!p.fold){p.publicCard=p.publicDeck.pop();p.privateCard=p.privateDeck.pop();p.usedPublic.push(p.publicCard);p.usedPrivate.push(p.privateCard);pay(r,p,UNIT);}});r.turn=r.players.find(p=>!p.fold&&!p.allin)?.id||null;log(r,`라운드 ${r.round} 시작 · 참가비 50,000원`);if(!r.turn)settle(r);else emit(r);}
-function eligible(r){return r.players.filter(p=>!p.fold&&!p.disconnected);}
-function next(r){const contenders=eligible(r).filter(p=>!p.allin);if(eligible(r).length<=1||contenders.length===0||contenders.every(p=>r.acted.has(p.id)&&p.roundBet===r.currentBet)){settle(r);return;}const start=r.players.findIndex(p=>p.id===r.turn);for(let i=1;i<=r.players.length;i++){const p=r.players[(start+i)%r.players.length];if(!p.fold&&!p.allin&&!p.disconnected&&(!r.acted.has(p.id)||p.roundBet<r.currentBet)){r.turn=p.id;emit(r);return;}}settle(r);}
-function settle(r){r.phase='result';r.turn=null;const alive=eligible(r);const best=Math.max(...alive.map(p=>p.publicCard+p.privateCard));const winners=alive.filter(p=>p.publicCard+p.privateCard===best);r.showdown=alive.map(p=>({id:p.id,publicCard:p.publicCard,privateCard:p.privateCard,sum:p.publicCard+p.privateCard}));if(winners.length){const share=Math.floor(r.pot/winners.length/UNIT)*UNIT;let remainder=r.pot-share*winners.length;winners.forEach((p,i)=>{p.money+=share+(i===0?remainder:0);});r.winners=winners.map(p=>p.id);log(r,`승자: ${winners.map(p=>p.name).join(', ')} · 합 ${best} · 팟 ${r.pot.toLocaleString()}원`);}else log(r,'승부 종료');if(r.round>=13||active(r).length<2){r.phase='finished';log(r,'게임 종료 · 최종 자본 순위 확정');}emit(r);}
-function clean(s,max){return String(s||'').trim().slice(0,max);}
-io.on('connection',socket=>{socket.on('create',({name},ack)=>{let c=code();while(rooms.has(c))c=code();const p={id:socket.id,name:clean(name,16)||'플레이어',money:START,disconnected:false};const r={code:c,host:p.id,players:[p],phase:'lobby',round:0,pot:0,currentBet:0,turn:null,log:[],winners:[],showdown:[]};rooms.set(c,r);socket.data.room=c;socket.join(c);ack?.({ok:true,code:c});emit(r);});socket.on('join',({code:c,name},ack)=>{c=clean(c,6).toUpperCase();const r=rooms.get(c);if(!r||r.phase!=='lobby'||r.players.length>=6){ack?.({error:'방이 없거나 이미 시작했거나 가득 찼습니다.'});return;}const p={id:socket.id,name:clean(name,16)||'플레이어',money:START,disconnected:false};r.players.push(p);socket.data.room=c;socket.join(c);ack?.({ok:true,code:c});log(r,`${p.name} 입장`);emit(r);});socket.on('start',()=>{const r=rooms.get(socket.data.room);if(!r||r.host!==socket.id||r.phase!=='lobby'||r.players.length<3)return;r.players.forEach(p=>{p.publicDeck=shuffle(Array.from({length:13},(_,i)=>i+1));p.privateDeck=shuffle(Array.from({length:13},(_,i)=>i+1));p.usedPublic=[];p.usedPrivate=[];});begin(r);});socket.on('action',({type,amount},ack)=>{const r=rooms.get(socket.data.room);if(!r||r.phase!=='bet'||r.turn!==socket.id)return ack?.({error:'지금은 내 차례가 아닙니다.'});const p=r.players.find(x=>x.id===socket.id);if(!p||p.fold||p.allin)return;const owed=Math.max(0,r.currentBet-p.roundBet);if(type==='fold'){p.fold=true;log(r,`${p.name}: 폴드`);}else if(type==='check'&&owed===0){log(r,`${p.name}: 체크`);}else if(type==='call'&&owed>0){pay(r,p,owed);log(r,`${p.name}: 콜`);}else if(type==='raise'){amount=Number(amount);if(!Number.isSafeInteger(amount)||amount<UNIT||amount%UNIT!==0||p.money<owed+amount)return ack?.({error:'레이즈 금액은 5만 원 단위이며 보유금 이내여야 합니다.'});pay(r,p,owed+amount);r.currentBet=p.roundBet;r.acted=new Set();log(r,`${p.name}: ${amount.toLocaleString()}원 레이즈`);}else return ack?.({error:'불가능한 행동입니다.'});r.acted.add(p.id);ack?.({ok:true});next(r);});socket.on('next',()=>{const r=rooms.get(socket.data.room);if(!r||r.host!==socket.id||r.phase!=='result')return;begin(r);});socket.on('disconnect',()=>{const r=rooms.get(socket.data.room);if(!r)return;const p=r.players.find(x=>x.id===socket.id);if(!p)return;if(r.phase==='lobby'){r.players=r.players.filter(x=>x.id!==socket.id);if(r.host===socket.id)r.host=r.players[0]?.id;if(!r.players.length){rooms.delete(r.code);return;}}else{p.disconnected=true;p.fold=true;if(r.phase==='bet'&&r.turn===socket.id){next(r);return;}}emit(r);});});
-server.listen(process.env.PORT||3000,()=>console.log('13 THE LAST BET running on port '+(process.env.PORT||3000)));
+// public 폴더가 있는 경우 정적 파일 제공
+app.use(express.static(path.join(__dirname, 'public')));
+
+function shuffle(arr) {
+  const a = [...arr];
+
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+
+  return a;
+}
+
+function makeCode() {
+  let code;
+
+  do {
+    code = Math.random()
+      .toString(36)
+      .slice(2, 8)
+      .toUpperCase();
+  } while (rooms.has(code));
+
+  return code;
+}
+
+function clean(value, max) {
+  return String(value || '').trim().slice(0, max);
+}
+
+function log(room, message) {
+  room.log.push(message);
+
+  if (room.log.length > 100) {
+    room.log.shift();
+  }
+}
+
+function active(room) {
+  return room.players.filter(
+    p => p.money > 0 && !p.disconnected
+  );
+}
+
+function eligible(room) {
+  return room.players.filter(
+    p => !p.fold && !p.disconnected
+  );
+}
+
+// 플레이어별 카드 정보 분리
+function emit(room) {
+  for (const viewer of room.players) {
+    const players = room.players.map(p => ({
+      id: p.id,
+      name: p.name,
+      money: p.money,
+      fold: p.fold,
+      allin: p.allin,
+      bet: p.bet,
+      roundBet: p.roundBet,
+      disconnected: p.disconnected,
+
+      // 자신의 공개 카드는 볼 수 없음
+      publicCard:
+        p.id === viewer.id ? null : p.publicCard,
+
+      // 자신의 비공개 카드만 볼 수 있음
+      privateCard:
+        p.id === viewer.id ? p.privateCard : null,
+
+      usedPublic:
+        p.id === viewer.id ? p.usedPublic : undefined,
+
+      usedPrivate:
+        p.id === viewer.id ? p.usedPrivate : undefined
+    }));
+
+    io.to(viewer.id).emit('state', {
+      code: room.code,
+      host: room.host,
+      phase: room.phase,
+      round: room.round,
+      pot: room.pot,
+      currentBet: room.currentBet,
+      turn: room.turn,
+      players,
+      me: viewer.id,
+      log: room.log.slice(-12),
+      winners: room.winners,
+      showdown: room.showdown,
+      canStart:
+        room.players.length >= 3 &&
+        room.players.length <= 6
+    });
+  }
+}
+
+// 참가비 및 배팅 처리
+function pay(room, player, amount) {
+  const paid = Math.min(amount, player.money);
+
+  player.money -= paid;
+  player.bet += paid;
+  player.roundBet += paid;
+  room.pot += paid;
+
+  if (player.money === 0) {
+    player.allin = true;
+  }
+
+  return paid;
+}
+
+// 라운드 시작
+function begin(room) {
+  room.round++;
+  room.phase = 'bet';
+  room.pot = 0;
+  room.currentBet = 0;
+  room.winners = [];
+  room.showdown = [];
+  room.acted = new Set();
+
+  for (const p of room.players) {
+    p.fold = p.money <= 0 || p.disconnected;
+    p.allin = false;
+    p.bet = 0;
+    p.roundBet = 0;
+    p.publicCard = null;
+    p.privateCard = null;
+
+    if (!p.fold) {
+      p.publicCard = p.publicDeck.pop();
+      p.privateCard = p.privateDeck.pop();
+
+      p.usedPublic.push(p.publicCard);
+      p.usedPrivate.push(p.privateCard);
+
+      pay(room, p, UNIT);
+    }
+  }
+
+  const first = room.players.find(
+    p => !p.fold && !p.allin
+  );
+
+  room.turn = first ? first.id : null;
+
+  log(
+    room,
+    `라운드 ${room.round} 시작 · 참가비 50,000원`
+  );
+
+  if (!room.turn) {
+    settle(room);
+  } else {
+    emit(room);
+  }
+}
+
+// 다음 배팅 차례
+function next(room) {
+  const remaining = eligible(room);
+
+  if (remaining.length <= 1) {
+    settle(room);
+    return;
+  }
+
+  const canAct = remaining.filter(p => !p.allin);
+
+  if (
+    canAct.length === 0 ||
+    canAct.every(
+      p =>
+        room.acted.has(p.id) &&
+        p.roundBet === room.currentBet
+    )
+  ) {
+    settle(room);
+    return;
+  }
+
+  const start = room.players.findIndex(
+    p => p.id === room.turn
+  );
+
+  for (let i = 1; i <= room.players.length; i++) {
+    const index =
+      (start + i + room.players.length) %
+      room.players.length;
+
+    const p = room.players[index];
+
+    if (
+      !p.fold &&
+      !p.allin &&
+      !p.disconnected &&
+      (
+        !room.acted.has(p.id) ||
+        p.roundBet < room.currentBet
+      )
+    ) {
+      room.turn = p.id;
+      emit(room);
+      return;
+    }
+  }
+
+  settle(room);
+}
+
+// 사이드 팟 정산
+function distributePots(room, contenders) {
+  const levels = [
+    ...new Set(
+      room.players
+        .map(p => p.bet)
+        .filter(n => n > 0)
+    )
+  ].sort((a, b) => a - b);
+
+  let previous = 0;
+  const winnerIds = new Set();
+
+  for (const level of levels) {
+    const contributors = room.players.filter(
+      p => p.bet >= level
+    );
+
+    const amount =
+      (level - previous) * contributors.length;
+
+    previous = level;
+
+    if (amount <= 0) continue;
+
+    const candidates = contenders.filter(
+      p => p.bet >= level
+    );
+
+    // 한 명만 남아 있는 경우에도 팟을 지급
+    if (candidates.length === 0) {
+      const fallback = contenders[0];
+
+      if (fallback) {
+        fallback.money += amount;
+        winnerIds.add(fallback.id);
+      }
+
+      continue;
+    }
+
+    const best = Math.max(
+      ...candidates.map(
+        p => p.publicCard + p.privateCard
+      )
+    );
+
+    const winners = candidates.filter(
+      p => p.publicCard + p.privateCard === best
+    );
+
+    // 금액은 항상 5만 원 단위로 나누어 지급
+    const units = Math.floor(amount / UNIT);
+    const each = Math.floor(units / winners.length);
+    const extra = units % winners.length;
+
+    winners.forEach((p, i) => {
+      const prize =
+        (each + (i < extra ? 1 : 0)) * UNIT;
+
+      p.money += prize;
+      winnerIds.add(p.id);
+    });
+
+    const leftover = amount % UNIT;
+
+    if (leftover > 0 && winners.length > 0) {
+      winners[0].money += leftover;
+    }
+  }
+
+  return [...winnerIds];
+}
+
+// 라운드 결과
+function settle(room) {
+  room.phase = 'result';
+  room.turn = null;
+
+  const contenders = eligible(room);
+
+  room.showdown = contenders.map(p => ({
+    id: p.id,
+    publicCard: p.publicCard,
+    privateCard: p.privateCard,
+    sum: p.publicCard + p.privateCard
+  }));
+
+  if (contenders.length > 0) {
+    room.winners = distributePots(room, contenders);
+
+    const names = room.players
+      .filter(p => room.winners.includes(p.id))
+      .map(p => p.name);
+
+    log(
+      room,
+      `승자: ${names.join(', ')} · 팟 ${room.pot.toLocaleString()}원`
+    );
+  } else {
+    // 모든 플레이어가 연결 해제된 예외 상황
+    log(room, '라운드 종료 · 참가자 없음');
+  }
+
+  if (
+    room.round >= MAX_ROUNDS ||
+    active(room).length < 2
+  ) {
+    room.phase = 'finished';
+
+    log(
+      room,
+      '게임 종료 · 최종 자본 순위 확정'
+    );
+  }
+
+  emit(room);
+}
+
+// 온라인 연결
+io.on('connection', socket => {
+
+  // 새 방 생성
+  socket.on('create', (data = {}, ack) => {
+    if (socket.data.room) {
+      return ack?.({
+        error: '이미 방에 참가 중입니다.'
+      });
+    }
+
+    const roomCode = makeCode();
+
+    const player = {
+      id: socket.id,
+      name: clean(data.name, 16) || '플레이어',
+      money: START,
+      disconnected: false
+    };
+
+    const room = {
+      code: roomCode,
+      host: player.id,
+      players: [player],
+      phase: 'lobby',
+      round: 0,
+      pot: 0,
+      currentBet: 0,
+      turn: null,
+      log: [],
+      winners: [],
+      showdown: []
+    };
+
+    rooms.set(roomCode, room);
+
+    socket.data.room = roomCode;
+    socket.join(roomCode);
+
+    ack?.({
+      ok: true,
+      code: roomCode
+    });
+
+    emit(room);
+  });
+
+  // 방 코드로 입장
+  socket.on('join', (data = {}, ack) => {
+    if (socket.data.room) {
+      return ack?.({
+        error: '이미 방에 참가 중입니다.'
+      });
+    }
+
+    const roomCode = clean(
+      data.code, 6
+    ).toUpperCase();
+
+    const room = rooms.get(roomCode);
+
+    if (
+      !room ||
+      room.phase !== 'lobby' ||
+      room.players.length >= 6
+    ) {
+      return ack?.({
+        error:
+          '방이 없거나 이미 시작했거나 가득 찼습니다.'
+      });
+    }
+
+    const player = {
+      id: socket.id,
+      name: clean(data.name, 16) || '플레이어',
+      money: START,
+      disconnected: false
+    };
+
+    room.players.push(player);
+
+    socket.data.room = roomCode;
+    socket.join(roomCode);
+
+    log(room, `${player.name} 입장`);
+
+    ack?.({
+      ok: true,
+      code: roomCode
+    });
+
+    emit(room);
+  });
+
+  // 게임 시작
+  socket.on('start', () => {
+    const room = rooms.get(socket.data.room);
+
+    if (
+      !room ||
+      room.host !== socket.id ||
+      room.phase !== 'lobby' ||
+      room.players.length < 3 ||
+      room.players.length > 6
+    ) {
+      return;
+    }
+
+    for (const p of room.players) {
+      p.publicDeck = shuffle(
+        Array.from(
+          { length: 13 },
+          (_, i) => i + 1
+        )
+      );
+
+      p.privateDeck = shuffle(
+        Array.from(
+          { length: 13 },
+          (_, i) => i + 1
+        )
+      );
+
+      p.usedPublic = [];
+      p.usedPrivate = [];
+    }
+
+    begin(room);
+  });
+
+  // 배팅
+  socket.on('action', (data = {}, ack) => {
+    const room = rooms.get(socket.data.room);
+
+    if (
+      !room ||
+      room.phase !== 'bet' ||
+      room.turn !== socket.id
+    ) {
+      return ack?.({
+        error: '지금은 내 차례가 아닙니다.'
+      });
+    }
+
+    const p = room.players.find(
+      x => x.id === socket.id
+    );
+
+    if (!p || p.fold || p.allin) {
+      return ack?.({
+        error: '배팅할 수 없습니다.'
+      });
+    }
+
+    const type = data.type;
+    const owed = Math.max(
+      0,
+      room.currentBet - p.roundBet
+    );
+
+    if (type === 'fold') {
+      p.fold = true;
+
+      log(room, `${p.name}: 폴드`);
+
+    } else if (type === 'check') {
+      if (owed !== 0) {
+        return ack?.({
+          error: '체크할 수 없습니다.'
+        });
+      }
+
+      log(room, `${p.name}: 체크`);
+
+    } else if (type === 'call') {
+      if (owed <= 0) {
+        return ack?.({
+          error: '콜할 금액이 없습니다.'
+        });
+      }
+
+      const paid = pay(room, p, owed);
+
+      log(
+        room,
+        `${p.name}: ${paid.toLocaleString()}원 콜`
+      );
+
+    } else if (type === 'raise') {
+      const amount = Number(data.amount);
+
+      if (
+        !Number.isSafeInteger(amount) ||
+        amount < UNIT ||
+        amount % UNIT !== 0 ||
+        p.money < owed + amount
+      ) {
+        return ack?.({
+          error:
+            '레이즈는 5만 원 단위이며 보유금 이내여야 합니다.'
+        });
+      }
+
+      pay(room, p, owed + amount);
+
+      room.currentBet = p.roundBet;
+      room.acted = new Set();
+
+      log(
+        room,
+        `${p.name}: ${amount.toLocaleString()}원 레이즈`
+      );
+
+    } else if (type === 'allin') {
+      const amount = p.money;
+
+      if (amount <= 0) {
+        return ack?.({
+          error: '올인할 금액이 없습니다.'
+        });
+      }
+
+      pay(room, p, amount);
+
+      if (p.roundBet > room.currentBet) {
+        room.currentBet = p.roundBet;
+        room.acted = new Set();
+      }
+
+      log(room, `${p.name}: 올인`);
+
+    } else {
+      return ack?.({
+        error: '불가능한 행동입니다.'
+      });
+    }
+
+    room.acted.add(p.id);
+
+    ack?.({ ok: true });
+
+    next(room);
+  });
+
+  // 다음 라운드
+  socket.on('next', () => {
+    const room = rooms.get(socket.data.room);
+
+    if (
+      !room ||
+      room.host !== socket.id ||
+      room.phase !== 'result'
+    ) {
+      return;
+    }
+
+    begin(room);
+  });
+
+  // 접속 종료
+  socket.on('disconnect', () => {
+    const room = rooms.get(socket.data.room);
+
+    if (!room) return;
+
+    const p = room.players.find(
+      x => x.id === socket.id
+    );
+
+    if (!p) return;
+
+    if (room.phase === 'lobby') {
+      room.players = room.players.filter(
+        x => x.id !== socket.id
+      );
+
+      if (room.host === socket.id) {
+        room.host = room.players[0]?.id;
+      }
+
+      if (room.players.length === 0) {
+        rooms.delete(room.code);
+        return;
+      }
+
+    } else {
+      p.disconnected = true;
+      p.fold = true;
+
+      if (
+        room.phase === 'bet' &&
+        room.turn === socket.id
+      ) {
+        next(room);
+        return;
+      }
+    }
+
+    emit(room);
+  });
+});
+
+// 서버 실행
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(
+    `13 THE LAST BET running on port ${PORT}`
+  );
+});
