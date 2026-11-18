@@ -1,8 +1,21 @@
-const express=require('express');
-const http=require('http');
-const {Server}=require('socket.io');
-const app=express(),server=http.createServer(app),io=new Server(server);
-app.use(express.static('public'));
+
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const path = require('path');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+// 게임 화면(index.html) 제공
+app.use(express.static(path.join(__dirname)));
+
+// 메인 주소 접속 시 게임 화면 표시
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 const rooms=new Map(),UNIT=50000,START=2000000;
 const shuffle=a=>{a=[...a];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;};
 const code=()=>Math.random().toString(36).slice(2,8).toUpperCase();
